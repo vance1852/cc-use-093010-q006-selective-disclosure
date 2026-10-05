@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS batches (
     protocol_id TEXT NOT NULL,
     protocol_version INTEGER NOT NULL,
     evidence_revision_id TEXT NOT NULL REFERENCES evidence_revisions(evidence_revision_id),
-    state TEXT NOT NULL CHECK (state IN ('draft', 'running', 'sealed', 'analyzing', 'analyzed', 'decided')),
+    state TEXT NOT NULL CHECK (state IN ('draft', 'running', 'sealed', 'analyzing', 'analyzed', 'decided', 'invalidated')),
     revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
     created_by TEXT NOT NULL REFERENCES users(user_id),
     created_at TEXT NOT NULL,
@@ -148,6 +148,77 @@ CREATE TABLE IF NOT EXISTS decisions (
     UNIQUE (batch_id, analysis_id)
 );
 
+CREATE TABLE IF NOT EXISTS disclosure_packages (
+    package_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL REFERENCES batches(batch_id),
+    decision_id INTEGER NOT NULL REFERENCES decisions(decision_id),
+    analysis_id INTEGER NOT NULL REFERENCES analyses(analysis_id),
+    purpose TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    recipient_kind TEXT NOT NULL CHECK (recipient_kind IN ('investor', 'regulator', 'assessor')),
+    recipient_jurisdiction TEXT NOT NULL,
+    allowed_statements_json TEXT NOT NULL,
+    redaction_rules_json TEXT NOT NULL,
+    data_regions_json TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked', 'expired', 'decision_invalid', 'jurisdiction_blocked')),
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    scope_sha256 TEXT NOT NULL CHECK (length(scope_sha256) = 64),
+    package_sha256 TEXT NOT NULL CHECK (length(package_sha256) = 64),
+    frozen_json TEXT NOT NULL,
+    key_id TEXT NOT NULL REFERENCES disclosure_keys(key_id),
+    signature_sha256 TEXT NOT NULL CHECK (length(signature_sha256) = 64),
+    issued_by TEXT NOT NULL REFERENCES users(user_id),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS disclosure_resignings (
+    resigning_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_package_id TEXT NOT NULL REFERENCES disclosure_packages(package_id),
+    new_package_id TEXT NOT NULL REFERENCES disclosure_packages(package_id),
+    reason TEXT NOT NULL,
+    scope_sha256 TEXT NOT NULL CHECK (length(scope_sha256) = 64),
+    requested_by TEXT NOT NULL REFERENCES users(user_id),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS disclosure_accesses (
+    access_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id TEXT NOT NULL,
+    package_sha256 TEXT NOT NULL CHECK (length(package_sha256) = 64),
+    recipient_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('delivered', 'denied')),
+    deny_reason TEXT,
+    actor_id TEXT NOT NULL,
+    accessed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS disclosure_jurisdiction_policy (
+    jurisdiction TEXT NOT NULL,
+    allowed_regions_json NOT NULL,
+    changed_at TEXT NOT NULL,
+    changed_by TEXT NOT NULL REFERENCES users(user_id),
+    PRIMARY KEY (jurisdiction, changed_at)
+);
+
+CREATE TABLE IF NOT EXISTS decision_invalidations (
+    decision_id INTEGER PRIMARY KEY REFERENCES decisions(decision_id),
+    batch_id TEXT NOT NULL REFERENCES batches(batch_id),
+    reason TEXT NOT NULL,
+    invalidated_by TEXT NOT NULL REFERENCES users(user_id),
+    invalidated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS disclosure_keys (
+    key_id TEXT PRIMARY KEY,
+    secret TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_type TEXT NOT NULL,
@@ -163,13 +234,17 @@ REQUIRED_TABLES = frozenset({
     "schema_meta", "protocol_catalog", "users", "cooperation_programs", "evidence_revisions", "batches",
     "observations", "idempotency_keys", "exclusion_requests", "analysis_jobs",
     "analyses", "decisions", "audit_events",
+    "disclosure_packages", "disclosure_resignings", "disclosure_accesses",
+    "disclosure_jurisdiction_policy", "decision_invalidations", "disclosure_keys",
 })
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
     """打开连接并启用严格的事务与外键设置。"""
 
-    connection = sqlite3.connect(str(path), isolation_level=None)
+    # HTTP 服务使用 ThreadingHTTPServer，连接会被工作线程共享；
+    # 写入由 BEGIN IMMEDIATE 与 busy_timeout 串行化。
+    connection = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 5000")

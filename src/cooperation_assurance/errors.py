@@ -29,3 +29,14 @@ class InvalidState(ServiceError):
 class ValidationFailed(ServiceError):
     code = "validation_failed"
     status = 422
+
+
+class DisclosureDenied(Forbidden):
+    """披露包当前不可读取；访问事实仍会被记录。"""
+
+    code = "disclosure_denied"
+    status = 403
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"披露包已不可读: {reason}")
+        self.reason = reason

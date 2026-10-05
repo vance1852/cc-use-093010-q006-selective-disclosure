@@ -7,6 +7,7 @@ import json
 import tempfile
 from pathlib import Path
 
+from .errors import DisclosureDenied, Forbidden
 from .jsonio import load_json
 from .service import AssuranceService
 from .storage import connect, inspect_schema
@@ -47,10 +48,17 @@ def run(workspace: Path) -> dict[str, object]:
                 "approver-1", "batch-demo", analysis["analysis_id"], decision_value, "离线验收决定"
             )
             report = service.report("auditor-1", "batch-demo")
+            decision_id = report["decision"]["decision_id"]
+            disclosure_summary = _run_disclosure_flow(
+                service,
+                batch_id="batch-demo",
+                analysis_id=analysis["analysis_id"],
+                decision_id=decision_id,
+            )
             schema = inspect_schema(connection)
         finally:
             connection.close()
-    if schema["missing_tables"] or schema["schema_version"] != "2":
+    if schema["missing_tables"] or schema["schema_version"] != "3":
         raise RuntimeError("SQLite 基础结构检查失败")
     return {
         "status": "ok",
@@ -61,7 +69,114 @@ def run(workspace: Path) -> dict[str, object]:
         "conclusion": analysis["result"]["conclusion"],
         "decision": report["decision"]["decision"],
         "event_count": len(report["events"]),
+        "disclosure": disclosure_summary,
         "schema": schema,
+    }
+
+
+def _run_disclosure_flow(
+    service: AssuranceService, *, batch_id: str, analysis_id: int, decision_id: int
+) -> dict[str, object]:
+    base = {
+        "batch_id": batch_id,
+        "analysis_id": analysis_id,
+        "decision_id": decision_id,
+        "allowed_statements": ["项目已完成预注册协议下的独立评估"],
+        "data_regions": ["CN", "SG"],
+    }
+    investor = service.issue_disclosure(
+        "approver-1",
+        purpose="境外投资人尽调",
+        recipient={"id": "investor-x", "kind": "investor", "jurisdiction": "sg"},
+        expires_at="2026-12-31T23:59:59Z",
+        **base,
+    )
+    regulator = service.issue_disclosure(
+        "approver-1",
+        purpose="属地监管例行核查",
+        recipient={"id": "regulator-cn", "kind": "regulator", "jurisdiction": "cn"},
+        expires_at="2027-12-31T23:59:59Z",
+        **base,
+    )
+    assessor = service.issue_disclosure(
+        "approver-1",
+        purpose="独立第三方评估",
+        recipient={"id": "assessor-iso", "kind": "assessor", "jurisdiction": "de"},
+        expires_at="2027-06-30T23:59:59Z",
+        **base,
+    )
+    # 同请求重试必须幂等，不产生第二个包。
+    replay = service.issue_disclosure(
+        "approver-1",
+        purpose="境外投资人尽调",
+        recipient={"id": "investor-x", "kind": "investor", "jurisdiction": "sg"},
+        expires_at="2026-12-31T23:59:59Z",
+        **base,
+    )
+    if not replay["replayed"] or replay["package_id"] != investor["package_id"]:
+        raise RuntimeError("披露签发重试没有返回原包")
+    # 投资人读取：商业敏感字段必须以摘要锚点遮蔽。
+    view = service.read_disclosure("investor-x", investor["package_id"])
+    document = view["envelope"]["document"]
+    if document["program"]["lead_organization"].get("__redacted__") is not True:
+        raise RuntimeError("投资人包未遮蔽牵头机构")
+    if document["analysis"]["conclusion"] != "pass":
+        raise RuntimeError("投资人包缺少总体结论")
+    # 错误接收主体读取必须被拒绝并留痕。
+    try:
+        service.read_disclosure("intruder", investor["package_id"])
+        raise RuntimeError("非授权接收主体竟能读取披露包")
+    except Forbidden:
+        pass
+    verification = service.verify_disclosure("auditor-1", investor["package_id"])
+    if not (
+        verification["signature_valid"]
+        and verification["package_sha256_match"]
+        and verification["document_sha256_match"]
+        and verification["scope_sha256_match"]
+        and verification["redaction_anchors_verified"]
+        and verification["evidence_anchors_verified"]
+    ):
+        raise RuntimeError("披露包来源或锚点校验失败")
+    # 主动撤回后不能再读，但访问事实保留。
+    service.revoke_disclosure("approver-1", regulator["package_id"], "核查提前结束")
+    try:
+        service.read_disclosure("regulator-cn", regulator["package_id"])
+        raise RuntimeError("撤回后竟能读取披露包")
+    except DisclosureDenied:
+        pass
+    # 重签续期不得改变范围指纹。
+    resigned = service.resign_disclosure(
+        "approver-1", assessor["package_id"],
+        new_expires_at="2028-06-30T23:59:59Z", reason="评估周期延长",
+    )
+    service.read_disclosure("assessor-iso", resigned["package_id"])
+    # 辖区限制变化：只允许驻留 CN，SG 境外包立即受阻；到期门控由时钟演示。
+    blocked = service.set_jurisdiction_restriction("approver-1", "SG", ["CN"])
+    try:
+        service.read_disclosure("investor-x", investor["package_id"])
+        raise RuntimeError("辖区限制变化后竟能读取披露包")
+    except DisclosureDenied:
+        pass
+    # 决定失效：其余有效包立即失效。
+    invalidated = service.invalidate_decision("approver-1", decision_id, "复议后撤销原准入决定")
+    ledger = service.disclosure_ledger("auditor-1")
+    if not ledger["scope_integrity"]:
+        raise RuntimeError("台账检测到范围指纹不一致")
+    if not all(item["scope_unchanged"] for item in ledger["resignings"]):
+        raise RuntimeError("重签扩大了授权范围")
+    denied_after_gate = [a for a in ledger["accesses"] if a["outcome"] == "denied"]
+    return {
+        "issued": 3,
+        "investor_package": investor["package_id"],
+        "resigned_package": resigned["package_id"],
+        "revoked_packages": [regulator["package_id"]],
+        "jurisdiction_blocked": blocked["affected_packages"],
+        "decision_invalidated_packages": invalidated["affected_packages"],
+        "delivered_count": len([a for a in ledger["accesses"] if a["outcome"] == "delivered"]),
+        "denied_count": len(denied_after_gate),
+        "scope_integrity": ledger["scope_integrity"],
+        "ledger_packages": len(ledger["packages"]),
     }
 
 

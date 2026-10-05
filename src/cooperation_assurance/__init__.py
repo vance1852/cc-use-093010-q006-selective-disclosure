@@ -1,5 +1,6 @@
-"""跨境合作项目证据评估与准入服务。"""
+"""跨境合作项目证据评估、准入与分级披露服务。"""
 
+from . import disclosure
 from .contracts import Observation, Protocol, ValidationError
 from .analysis import ALGORITHM_VERSION, analyze, bootstrap_mean_interval
 from .numeric import NumericSummary, WilsonInterval
@@ -15,6 +16,7 @@ __all__ = [
     "AssuranceService",
     "analyze",
     "bootstrap_mean_interval",
+    "disclosure",
 ]
 
 __version__ = "0.1.0"

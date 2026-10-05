@@ -133,6 +133,51 @@ class JsonApplication:
                     payload["decision"], payload["reason"],
                 )
                 return Response(201, result)
+            if method == "POST" and len(parts) == 3 and parts[0] == "decisions" and parts[2] == "invalidate":
+                result = self.service.invalidate_decision(
+                    self._actor(normalized_headers), int(parts[1]), payload["reason"]
+                )
+                return Response(200, result)
+            if method == "POST" and path == "/disclosure_keys/rotate":
+                return Response(200, self.service.rotate_disclosure_key(self._actor(normalized_headers)))
+            if method == "POST" and path == "/disclosures":
+                result = self.service.issue_disclosure(
+                    self._actor(normalized_headers),
+                    batch_id=payload["batch_id"],
+                    analysis_id=int(payload["analysis_id"]),
+                    decision_id=int(payload["decision_id"]),
+                    purpose=payload["purpose"],
+                    recipient=payload["recipient"],
+                    allowed_statements=payload["allowed_statements"],
+                    data_regions=payload["data_regions"],
+                    expires_at=payload["expires_at"],
+                    redaction_rules=payload.get("redaction_rules"),
+                )
+                return Response(201, result)
+            if method == "GET" and len(parts) == 2 and parts[0] == "disclosures" and parts[1] == "ledger":
+                return Response(200, self.service.disclosure_ledger(self._actor(normalized_headers)))
+            if method == "POST" and len(parts) == 3 and parts[0] == "disclosures" and parts[2] == "read":
+                result = self.service.read_disclosure(str(payload["recipient_id"]), parts[1])
+                return Response(200, result)
+            if method == "GET" and len(parts) == 3 and parts[0] == "disclosures" and parts[2] == "verify":
+                result = self.service.verify_disclosure(self._actor(normalized_headers), parts[1])
+                return Response(200, result)
+            if method == "POST" and len(parts) == 3 and parts[0] == "disclosures" and parts[2] == "revoke":
+                result = self.service.revoke_disclosure(
+                    self._actor(normalized_headers), parts[1], payload["reason"]
+                )
+                return Response(200, result)
+            if method == "POST" and len(parts) == 3 and parts[0] == "disclosures" and parts[2] == "resign":
+                result = self.service.resign_disclosure(
+                    self._actor(normalized_headers), parts[1],
+                    new_expires_at=payload["new_expires_at"], reason=payload["reason"],
+                )
+                return Response(200, result)
+            if method == "POST" and path == "/jurisdiction_restrictions":
+                result = self.service.set_jurisdiction_restriction(
+                    self._actor(normalized_headers), payload["jurisdiction"], payload["allowed_regions"]
+                )
+                return Response(200, result)
             return Response(404, {"error": {"code": "route_not_found", "message": "接口不存在"}})
         except ServiceError as exc:
             return Response(exc.status, {"error": {"code": exc.code, "message": str(exc)}})
