@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS protocol_catalog (
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('operator', 'statistician', 'approver', 'auditor')),
+    role TEXT NOT NULL CHECK (role IN ('operator', 'statistician', 'approver', 'auditor', 'compliance')),
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
 );
 
@@ -157,12 +157,84 @@ CREATE TABLE IF NOT EXISTS audit_events (
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- 分级披露：封签密钥支持轮换；旧披露包继续可用旧密钥验签。
+CREATE TABLE IF NOT EXISTS sealing_keys (
+    key_id TEXT PRIMARY KEY,
+    secret_b64 TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+    created_at TEXT NOT NULL,
+    retired_at TEXT
+);
+
+-- 分级披露：由责任方选择版本、目的、接收主体、允许声明、遮蔽规则和期限后冻结。
+CREATE TABLE IF NOT EXISTS disclosure_packages (
+    package_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL REFERENCES batches(batch_id),
+    analysis_id INTEGER NOT NULL REFERENCES analyses(analysis_id),
+    decision_id INTEGER REFERENCES decisions(decision_id),
+    purpose_code TEXT NOT NULL,
+    purpose_detail TEXT NOT NULL,
+    recipient_class TEXT NOT NULL CHECK (recipient_class IN ('foreign_investor', 'local_regulator', 'independent_assessor')),
+    recipients_json TEXT NOT NULL,
+    allowed_statements_json TEXT NOT NULL,
+    field_policy_json TEXT NOT NULL,
+    jurisdictions_allowed_json TEXT NOT NULL,
+    effective_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    retain_until TEXT NOT NULL,
+    scope_fingerprint TEXT NOT NULL CHECK (length(scope_fingerprint) = 64),
+    package_sha256 TEXT NOT NULL CHECK (length(package_sha256) = 64),
+    envelope_json TEXT NOT NULL,
+    sign_key_id TEXT NOT NULL,
+    sign_key_seq INTEGER NOT NULL DEFAULT 1 CHECK (sign_key_seq > 0),
+    signature TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'revoked')),
+    superseded_by TEXT REFERENCES disclosure_packages(package_id),
+    revocation_reason TEXT,
+    revoked_by TEXT REFERENCES users(user_id),
+    revoked_at TEXT,
+    created_by TEXT NOT NULL REFERENCES users(user_id),
+    created_at TEXT NOT NULL,
+    UNIQUE (package_sha256)
+);
+
+CREATE INDEX IF NOT EXISTS idx_disclosure_packages_batch ON disclosure_packages(batch_id);
+
+-- 分级披露：每个接收主体一个不透明投递令牌（仅存其 SHA-256）；令牌只用于读披露包。
+CREATE TABLE IF NOT EXISTS disclosure_recipients (
+    package_id TEXT NOT NULL REFERENCES disclosure_packages(package_id),
+    recipient_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    jurisdiction TEXT NOT NULL,
+    token_sha256 TEXT NOT NULL CHECK (length(token_sha256) = 64),
+    PRIMARY KEY (package_id, recipient_id)
+);
+
+-- 分级披露：读取尝试（含被拒绝）与交付事实永久保留，不随撤回删除。
+CREATE TABLE IF NOT EXISTS disclosure_accesses (
+    access_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id TEXT NOT NULL REFERENCES disclosure_packages(package_id),
+    attempt_id TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    recipient_id TEXT,
+    jurisdiction TEXT,
+    decision TEXT NOT NULL CHECK (decision IN ('delivered', 'denied')),
+    deny_reason TEXT,
+    fields_seen_json TEXT,
+    digest_sha256 TEXT,
+    attempted_at TEXT NOT NULL,
+    UNIQUE (package_id, attempt_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_disclosure_accesses_package ON disclosure_accesses(package_id, access_id);
 """
 
 REQUIRED_TABLES = frozenset({
     "schema_meta", "protocol_catalog", "users", "cooperation_programs", "evidence_revisions", "batches",
     "observations", "idempotency_keys", "exclusion_requests", "analysis_jobs",
     "analyses", "decisions", "audit_events",
+    "sealing_keys", "disclosure_packages", "disclosure_recipients", "disclosure_accesses",
 })
 
 

@@ -133,6 +133,42 @@ class JsonApplication:
                     payload["decision"], payload["reason"],
                 )
                 return Response(201, result)
+            if method == "POST" and path == "/signing_keys/rotate":
+                return Response(200, self.service.rotate_signing_key(self._actor(normalized_headers)))
+            if method == "POST" and path == "/disclosure_packages":
+                result = self.service.create_disclosure_package(self._actor(normalized_headers), payload)
+                return Response(201, result)
+            if method == "POST" and len(parts) == 3 and parts[0] == "disclosure_packages" and parts[2] == "read":
+                result = self.service.read_disclosure_package(
+                    parts[1], payload["recipient_id"], payload["token"],
+                    payload["jurisdiction"], payload.get("attempt_id", ""),
+                )
+                return Response(200, result)
+            if method == "POST" and len(parts) == 3 and parts[0] == "disclosure_packages" and parts[2] == "revoke":
+                result = self.service.revoke_disclosure_package(
+                    self._actor(normalized_headers), parts[1], payload["reason"]
+                )
+                return Response(200, result)
+            if method == "POST" and len(parts) == 3 and parts[0] == "disclosure_packages" and parts[2] == "restrict":
+                result = self.service.restrict_disclosure_jurisdictions(
+                    self._actor(normalized_headers), parts[1], payload["jurisdictions"]
+                )
+                return Response(200, result)
+            if method == "POST" and len(parts) == 3 and parts[0] == "disclosure_packages" and parts[2] == "resign":
+                return Response(200, self.service.resign_disclosure_package(self._actor(normalized_headers), parts[1]))
+            if method == "GET" and len(parts) == 3 and parts[0] == "disclosure_packages" and parts[2] == "verify":
+                return Response(200, self.service.verify_disclosure_package(parts[1]))
+            if method == "GET" and len(parts) == 3 and parts[0] == "disclosure_packages" and parts[2] == "redactions":
+                return Response(
+                    200,
+                    self.service.verify_disclosure_redactions(self._actor(normalized_headers), parts[1]),
+                )
+            if method == "GET" and path == "/disclosure_ledger":
+                return Response(200, self.service.disclosure_ledger(self._actor(normalized_headers)))
+            if method == "GET" and len(parts) == 3 and parts[0] == "disclosure_ledger" and parts[1] == "packages":
+                return Response(
+                    200, self.service.disclosure_ledger(self._actor(normalized_headers), parts[2])
+                )
             return Response(404, {"error": {"code": "route_not_found", "message": "接口不存在"}})
         except ServiceError as exc:
             return Response(exc.status, {"error": {"code": exc.code, "message": str(exc)}})
